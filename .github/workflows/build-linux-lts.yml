@@ -81,3 +81,4 @@ jobs:
         asset_path: /mnt/arch/build/*.pkg.tar.zst
         asset_name: linux-lts-zen-${{ env.LATEST_LTS }}.pkg.tar.zst
         asset_content_type: application/zst
+
