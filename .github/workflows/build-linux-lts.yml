@@ -1,12 +1,11 @@
-name: Build Linux LTS with Zen Patch
+name: Build Linux LTS Zen for Arch Linux
 
 on:
   push:
     branches:
       - main  # 或者你希望触发CI的分支
-  pull_request:
-    branches:
-      - main
+  schedule:
+    - cron: '0 0 * * *'  # 每天定时运行一次，可以根据需要调整时间
 
 jobs:
   build:
@@ -19,51 +18,48 @@ jobs:
     - name: Set up dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential bc cpio gettext libelf-dev libncurses-dev python3 python3-pip git wget tar xz-utils patch libssl-dev flex bison
+        sudo apt-get install -y jq
 
-    - name: Download Linux source
+    - name: Get latest LTS kernel version
+      id: get_kernel_version
       run: |
-        wget https://cdn.kernel.org/pub/linux/kernel/v${{ secrets.KERNEL_VERSION }}.x/linux-${{ secrets.KERNEL_VERSION }}.tar.xz
-        tar -xf linux-${{ secrets.KERNEL_VERSION }}.tar.xz
-        mv linux-${{ secrets.KERNEL_VERSION }} linux
-        cd linux
+        LATEST_LTS=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker == "longterm") | .version' | sort -V | tail -n 1)
+        echo "LATEST_LTS=${LATEST_LTS}" >> $GITHUB_ENV
 
-    - name: Apply Zen patches
+    - name: Set up Arch Linux environment
       run: |
-        git clone https://github.com/zen-kernel/zen-kernel.git
-        cd linux
-        git checkout v${{ secrets.KERNEL_VERSION }}
-        cd ..
-        patch -p1 < zen-kernel/zen.patch
+        sudo apt-get install -y arch-install-scripts
+        sudo mkdir -p /mnt/arch
+        sudo pacstrap /mnt/arch base base-devel git wget
+        sudo cp /etc/resolv.conf /mnt/arch/etc/
+        sudo mount -t proc /proc /mnt/arch/proc
+        sudo mount --rbind /sys /mnt/arch/sys
+        sudo mount --rbind /dev /mnt/arch/dev
+        sudo chroot /mnt/arch /bin/bash -c "useradd -m builder && echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder"
 
-    - name: Copy config and prepare build
+    - name: Set up build environment
       run: |
-        cd linux
-        cp ../config .config
-        make olddefconfig
+        sudo chroot /mnt/arch /bin/bash -c "pacman -Syu --noconfirm"
+        sudo chroot /mnt/arch /bin/bash -c "sudo -u builder git clone https://aur.archlinux.org/yay.git /home/builder/yay"
+        sudo chroot /mnt/arch /bin/bash -c "cd /home/builder/yay && sudo -u builder makepkg -si --noconfirm"
+        sudo chroot /mnt/arch /bin/bash -c "sudo -u builder yay -S --noconfirm cpio bc libelf pahole perl python tar xz graphviz imagemagick python-sphinx texlive-latexextra"
 
-    - name: Compile the kernel
+    - name: Copy PKGBUILD and patches
       run: |
-        cd linux
-        make -j$(nproc) bzImage modules
+        sudo mkdir -p /mnt/arch/build
+        sudo cp -r . /mnt/arch/build
+        sudo chroot /mnt/arch /bin/bash -c "chown -R builder:builder /build"
+        sudo chroot /mnt/arch /bin/bash -c "sed -i 's/pkgver=.*/pkgver=${{ env.LATEST_LTS }}/' /build/PKGBUILD"
 
-    - name: Package the kernel
+    - name: Build package
       run: |
-        cd linux
-        mkdir -p release
-        cp arch/x86/boot/bzImage release/vmlinuz
-        make INSTALL_MOD_PATH=release modules_install
-
-    - name: Create archive
-      run: |
-        cd linux/release
-        tar -czf linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz *
+        sudo chroot /mnt/arch /bin/bash -c "cd /build && sudo -u builder makepkg -s"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v2
       with:
         name: linux-lts-zen
-        path: linux/release/linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz
+        path: /mnt/arch/build/*.pkg.tar.zst
 
     - name: Create GitHub Release
       id: create_release
@@ -71,8 +67,8 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: v${{ secrets.KERNEL_VERSION }}-zen
-        release_name: Linux LTS Zen ${{ secrets.KERNEL_VERSION }}
+        tag_name: v${{ env.LATEST_LTS }}-zen
+        release_name: Linux LTS Zen ${{ env.LATEST_LTS }}
         draft: false
         prerelease: false
 
@@ -82,7 +78,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: linux/release/linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz
-        asset_name: linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz
-        asset_content_type: application/gzip
-
+        asset_path: /mnt/arch/build/*.pkg.tar.zst
+        asset_name: linux-lts-zen-${{ env.LATEST_LTS }}.pkg.tar.zst
+        asset_content_type: application/zst
