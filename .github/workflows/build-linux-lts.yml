@@ -15,51 +15,29 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v2
 
-    - name: Set up dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y jq
-
     - name: Get latest LTS kernel version
       id: get_kernel_version
       run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
         LATEST_LTS=$(curl -s https://www.kernel.org/releases.json | jq -r '.releases[] | select(.moniker == "longterm") | .version' | sort -V | tail -n 1)
         echo "LATEST_LTS=${LATEST_LTS}" >> $GITHUB_ENV
 
-    - name: Set up Arch Linux environment
+    - name: Build in Docker
       run: |
-        sudo apt-get install -y arch-install-scripts
-        sudo mkdir -p /mnt/arch
-        sudo pacstrap /mnt/arch base base-devel git wget
-        sudo cp /etc/resolv.conf /mnt/arch/etc/
-        sudo mount -t proc /proc /mnt/arch/proc
-        sudo mount --rbind /sys /mnt/arch/sys
-        sudo mount --rbind /dev /mnt/arch/dev
-        sudo chroot /mnt/arch /bin/bash -c "useradd -m builder && echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder"
-
-    - name: Set up build environment
-      run: |
-        sudo chroot /mnt/arch /bin/bash -c "pacman -Syu --noconfirm"
-        sudo chroot /mnt/arch /bin/bash -c "sudo -u builder git clone https://aur.archlinux.org/yay.git /home/builder/yay"
-        sudo chroot /mnt/arch /bin/bash -c "cd /home/builder/yay && sudo -u builder makepkg -si --noconfirm"
-        sudo chroot /mnt/arch /bin/bash -c "sudo -u builder yay -S --noconfirm cpio bc libelf pahole perl python tar xz graphviz imagemagick python-sphinx texlive-latexextra"
-
-    - name: Copy PKGBUILD and patches
-      run: |
-        sudo mkdir -p /mnt/arch/build
-        sudo cp -r . /mnt/arch/build
-        sudo chroot /mnt/arch /bin/bash -c "chown -R builder:builder /build"
-        sudo chroot /mnt/arch /bin/bash -c "sed -i 's/pkgver=.*/pkgver=${{ env.LATEST_LTS }}/' /build/PKGBUILD"
-
-    - name: Build package
-      run: |
-        sudo chroot /mnt/arch /bin/bash -c "cd /build && sudo -u builder makepkg -s"
+        docker run --rm -v $PWD:/workspace -w /workspace archlinux:latest /bin/bash -c "
+          pacman -Syu --noconfirm && \
+          pacman -S --noconfirm base-devel git wget cpio bc libelf pahole perl python tar xz graphviz imagemagick python-sphinx texlive-latexextra && \
+          useradd -m builder && \
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder && \
+          su builder -c 'cd /workspace && makepkg -s'
+        "
 
     - name: Upload artifact
       uses: actions/upload-artifact@v2
       with:
         name: linux-lts-zen
-        path: /mnt/arch/build/*.pkg.tar.zst
+        path: "*.pkg.tar.zst"
 
     - name: Create GitHub Release
       id: create_release
@@ -78,7 +56,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: /mnt/arch/build/*.pkg.tar.zst
+        asset_path: "*.pkg.tar.zst"
         asset_name: linux-lts-zen-${{ env.LATEST_LTS }}.pkg.tar.zst
         asset_content_type: application/zst
-
