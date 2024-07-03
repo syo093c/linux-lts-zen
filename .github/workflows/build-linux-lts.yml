@@ -1,0 +1,88 @@
+name: Build Linux LTS with Zen Patch
+
+on:
+  push:
+    branches:
+      - main  # 或者你希望触发CI的分支
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Set up dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential bc cpio gettext libelf-dev libncurses-dev python3 python3-pip git wget tar xz-utils patch libssl-dev flex bison
+
+    - name: Download Linux source
+      run: |
+        wget https://cdn.kernel.org/pub/linux/kernel/v${{ secrets.KERNEL_VERSION }}.x/linux-${{ secrets.KERNEL_VERSION }}.tar.xz
+        tar -xf linux-${{ secrets.KERNEL_VERSION }}.tar.xz
+        mv linux-${{ secrets.KERNEL_VERSION }} linux
+        cd linux
+
+    - name: Apply Zen patches
+      run: |
+        git clone https://github.com/zen-kernel/zen-kernel.git
+        cd linux
+        git checkout v${{ secrets.KERNEL_VERSION }}
+        cd ..
+        patch -p1 < zen-kernel/zen.patch
+
+    - name: Copy config and prepare build
+      run: |
+        cd linux
+        cp ../config .config
+        make olddefconfig
+
+    - name: Compile the kernel
+      run: |
+        cd linux
+        make -j$(nproc) bzImage modules
+
+    - name: Package the kernel
+      run: |
+        cd linux
+        mkdir -p release
+        cp arch/x86/boot/bzImage release/vmlinuz
+        make INSTALL_MOD_PATH=release modules_install
+
+    - name: Create archive
+      run: |
+        cd linux/release
+        tar -czf linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz *
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: linux-lts-zen
+        path: linux/release/linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz
+
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ secrets.KERNEL_VERSION }}-zen
+        release_name: Linux LTS Zen ${{ secrets.KERNEL_VERSION }}
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: linux/release/linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz
+        asset_name: linux-lts-zen-${{ secrets.KERNEL_VERSION }}.tar.gz
+        asset_content_type: application/gzip
+
